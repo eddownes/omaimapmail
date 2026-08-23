@@ -50,6 +50,27 @@ UNSEEN_SEARCH_RETRY_DELAY = 0.5  # seconds between retries
 BACKOFF_TIERS = [2, 5, 15, 30, 60]  # seconds, for network-error reconnects
 AUTH_ERROR_RETRY_SECONDS = 300  # a bad password/mailbox won't fix itself; don't hammer the server
 
+# --- Resource ceilings -------------------------------------------------
+# Every one of these bounds a place where an untrusted input (a mail server,
+# a message on it, a keyring helper's output, or a local config/state file
+# that's been swapped out from under us) would otherwise be trusted to name
+# its own size. None of this is about normal operation - normal accounts,
+# messages, and files sit far under every ceiling below - it's about making
+# sure a hostile or corrupted one can only ever cost a bounded amount of
+# memory/CPU rather than an unbounded amount.
+MAX_UNTAGGED_LINES = 1000  # untagged IMAP response lines drained/awaited per IDLE cycle
+MAX_MESSAGE_FETCH_BYTES = 1 * 1024 * 1024  # bytes of a message fetched (headers + body prefix)
+MAX_MIME_PARTS_SCANNED = 1000  # MIME parts walked per message when hunting for a text body
+MAX_FIELD_CHARS = 300  # decoded header field (subject, sender name/address) kept per message
+MAX_ERROR_MESSAGE_CHARS = 500  # exception/server text kept when emitting an error event
+MAX_SECRET_BYTES = 8 * 1024  # secret-tool stdout (a password) accepted
+MAX_HELPER_TIMEOUT_SECONDS = 10  # wall-clock budget for the secret-tool helper
+MAX_CONFIG_FILE_BYTES = 2 * 1024 * 1024  # accounts.json read from disk
+MAX_STATE_FILE_BYTES = 2 * 1024 * 1024  # per-account state.json read from disk
+MAX_ACCOUNTS = 50  # watcher threads started, regardless of how many accounts.json lists
+MAX_FETCH_LIMIT = 200  # clamp on a per-account "fetchLimit" from accounts.json
+MAX_KNOWN_IDS = 5000  # seen-mail baseline entries kept per account
+
 _emit_lock = threading.Lock()
 
 
@@ -59,7 +80,11 @@ def emit(event: dict) -> None:
 
 
 def fail(account_id: str, kind: str, message: str) -> None:
-    emit({"type": "error", "accountId": account_id, "kind": kind, "message": message})
+    # `message` can originate from a hostile server (exception text embedding
+    # its own greeting/response) or a helper's stderr, so it's capped like any
+    # other emitted field rather than passed through at whatever length it
+    # happened to arrive in.
+    emit({"type": "error", "accountId": account_id, "kind": kind, "message": message[:MAX_ERROR_MESSAGE_CHARS]})
 
 
 class IMAP4Idle(imaplib.IMAP4_SSL):
@@ -72,6 +97,10 @@ class IMAP4Idle(imaplib.IMAP4_SSL):
         return tag
 
     def idle_wait(self, timeout: float) -> list:
+        # `readline()` itself already caps a single line's length (imaplib's
+        # own _MAXLINE), but a server that just keeps pushing untagged lines
+        # back-to-back inside the drain window could still make this loop
+        # accumulate an unbounded number of them; cap the count too.
         self.sock.settimeout(timeout)
         lines = []
         try:
@@ -84,7 +113,7 @@ class IMAP4Idle(imaplib.IMAP4_SSL):
             return lines
         self.sock.settimeout(DRAIN_TIMEOUT_SECONDS)
         try:
-            while True:
+            while len(lines) < MAX_UNTAGGED_LINES:
                 line = self.readline()
                 if not line:
                     break
@@ -97,36 +126,89 @@ class IMAP4Idle(imaplib.IMAP4_SSL):
 
     def idle_done(self, tag: bytes) -> None:
         self.send(b"DONE\r\n")
-        while True:
+        for _ in range(MAX_UNTAGGED_LINES):
             line = self.readline()
             if not line or line.startswith(tag):
+                return
+        raise RuntimeError("server did not complete IDLE within %d lines" % MAX_UNTAGGED_LINES)
+
+
+def _read_bounded(pipe, max_bytes: int, result: dict) -> None:
+    chunks = []
+    total = 0
+    try:
+        while True:
+            chunk = pipe.read(65536)
+            if not chunk:
                 break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                break
+    except (OSError, ValueError):
+        pass
+    result["data"] = b"".join(chunks)[:max_bytes]
+    result["truncated"] = total > max_bytes
+
+
+def run_bounded(cmd: list, timeout: float, max_bytes: int) -> tuple:
+    """Run `cmd`, capturing stdout up to `max_bytes` within `timeout` seconds.
+
+    A plain `subprocess.run(capture_output=True)` trusts the child to produce
+    a reasonable amount of output before it decides to stop; a replaced or
+    compromised helper binary doesn't have to honor that. Reading on a
+    background thread lets us cut the child off — by byte count or by
+    wall-clock — instead of buffering whatever it sends.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    result = {}
+    reader = threading.Thread(target=_read_bounded, args=(proc.stdout, max_bytes, result), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    timed_out = reader.is_alive()
+    truncated = result.get("truncated", False)
+    if timed_out or truncated:
+        proc.kill()
+        reader.join(2)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    if truncated:
+        raise RuntimeError("helper %r output exceeded %d bytes" % (cmd[0], max_bytes))
+    return proc.returncode, result.get("data", b"")
 
 
 def load_password(service: str, account: str) -> str:
-    result = subprocess.run(
+    returncode, stdout = run_bounded(
         ["secret-tool", "lookup", "service", service, "account", account],
-        capture_output=True, text=True, timeout=10,
+        MAX_HELPER_TIMEOUT_SECONDS, MAX_SECRET_BYTES,
     )
-    if result.returncode != 0 or not result.stdout:
+    if returncode != 0 or not stdout:
         raise RuntimeError(
             "no secret found for service=%r account=%r; store one with: "
             "secret-tool store --label=\"OmaIMAPMail: %s\" service %s account %s"
             % (service, account, account, service, account)
         )
-    return result.stdout.rstrip("\n")
+    return stdout.decode("utf-8", errors="replace").rstrip("\n")
 
 
 def decode_header_value(raw: str) -> str:
     if not raw:
         return ""
+    # `raw` is server-supplied and its decoded form is only ever used for a
+    # subject line or a sender name/address, so cap it here at the single
+    # choke point rather than trusting every caller to do it.
+    raw = raw[: MAX_FIELD_CHARS * 4]  # decode_header() can expand encoded-words; cap the input too
     decoded = []
     for text, charset in email.header.decode_header(raw):
         if isinstance(text, bytes):
             decoded.append(text.decode(charset or "utf-8", errors="replace"))
         else:
             decoded.append(text)
-    return "".join(decoded).strip()
+    return "".join(decoded).strip()[:MAX_FIELD_CHARS]
 
 
 def decode_payload(payload: bytes, charset: str) -> str:
@@ -138,7 +220,13 @@ def decode_payload(payload: bytes, charset: str) -> str:
 
 def extract_part(msg: email.message.Message, content_type: str) -> str | None:
     if msg.is_multipart():
-        for part in msg.walk():
+        # A message could pack many trivial parts into the fetch-size budget
+        # (MAX_MESSAGE_FETCH_BYTES already bounds total bytes, but not how
+        # finely they're subdivided); stop hunting after a bounded number of
+        # parts rather than walking however many the message contains.
+        for count, part in enumerate(msg.walk()):
+            if count >= MAX_MIME_PARTS_SCANNED:
+                break
             if part.get_content_type() == content_type and not part.get_filename():
                 payload = part.get_payload(decode=True)
                 if payload is None:
@@ -221,10 +309,17 @@ def fetch_unseen(imap: IMAP4Idle, limit: int) -> list:
     for uid in candidates:
         if limit and len(messages) >= limit:
             break
-        status, data = imap.uid("fetch", uid, "(BODY.PEEK[])")
+        # `<0.N>` is IMAP's partial-fetch syntax: the server sends at most N
+        # octets of the body starting at 0, so a message's own declared size
+        # can no longer dictate how much this reads off the wire (headers -
+        # which is all a hostile literal-length claim could otherwise inflate
+        # - come first, well within the cap). Plain BODY.PEEK[] would trust
+        # the server/message to name its own size, which is exactly what
+        # let a hostile message or server exhaust memory here.
+        status, data = imap.uid("fetch", uid, "(BODY.PEEK[]<0.%d>)" % MAX_MESSAGE_FETCH_BYTES)
         if status != "OK" or not data or not data[0]:
             continue
-        raw = data[0][1]
+        raw = data[0][1][:MAX_MESSAGE_FETCH_BYTES]
         msg = email.message_from_bytes(raw)
 
         name, addr = email.utils.parseaddr(decode_header_value(msg.get("From", "")))
@@ -250,14 +345,35 @@ def state_path_for(account_id: str, state_dir: str) -> str:
     return os.path.join(state_dir, account_id, "state.json")
 
 
+def read_json_capped(path: str, max_bytes: int):
+    # Local files are normally trusted, but this one can be swapped out from
+    # under us (a stale/replaced state.json, or an accounts.json edited by
+    # something other than the settings UI) - so don't hand json.load()
+    # however many bytes it wants to. Reading max_bytes+1 lets us tell
+    # "exactly at the cap" apart from "over it" without buffering more than
+    # one byte past the limit.
+    with open(path, "rb") as handle:
+        raw = handle.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ValueError("%s exceeds %d bytes" % (path, max_bytes))
+    return json.loads(raw.decode("utf-8"))
+
+
 def load_known_ids(path: str):
     # Returns None (no baseline yet — e.g. first run for this account) so the
     # caller knows not to notify on whatever the very first snapshot finds.
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        data = read_json_capped(path, MAX_STATE_FILE_BYTES)
         ids = data.get("knownIds")
-        return ids if isinstance(ids, dict) else {}
+        if not isinstance(ids, dict):
+            return {}
+        # Cap how many baseline entries we carry forward: this is only ever
+        # used for "have we seen this id" membership checks, so an
+        # oversized/corrupted state file degrades to a smaller baseline
+        # rather than an unbounded in-memory dict.
+        if len(ids) > MAX_KNOWN_IDS:
+            ids = dict(list(ids.items())[:MAX_KNOWN_IDS])
+        return ids
     except FileNotFoundError:
         return None
     except Exception:
@@ -301,7 +417,7 @@ def watch_account(account: dict, state_dir: str) -> None:
     mailbox = str(account.get("mailbox", "INBOX"))
     acct_email = str(account["account"])
     secret_service = str(account.get("secretService", "omaimapmail-" + account_id))
-    fetch_limit = int(account.get("fetchLimit", 20))
+    fetch_limit = max(1, min(int(account.get("fetchLimit", 20)), MAX_FETCH_LIMIT))
     state_file = state_path_for(account_id, state_dir)
 
     known_ids = load_known_ids(state_file)
@@ -363,7 +479,13 @@ def watch_account(account: dict, state_dir: str) -> None:
                 # keepalive cycle just re-fetches the same (cheap) snapshot,
                 # which also self-heals any push notification the server
                 # dropped.
-        except (OSError, ssl.SSLError, socket.timeout, imaplib.IMAP4.error) as error:
+        except (OSError, ssl.SSLError, socket.timeout, imaplib.IMAP4.error, RuntimeError) as error:
+            # RuntimeError covers IMAP4Idle's own IDLE-protocol failures
+            # (rejected IDLE, connection dropped mid-IDLE, a server that never
+            # completes DONE within MAX_UNTAGGED_LINES) - without it here, a
+            # server that triggers one of those would silently kill this
+            # thread instead of backing off and reconnecting like every other
+            # network failure does.
             fail(account_id, "network", str(error))
         finally:
             if imap is not None:
@@ -383,8 +505,7 @@ def main() -> int:
         return 2
 
     try:
-        with open(sys.argv[1], "r", encoding="utf-8") as handle:
-            config = json.load(handle)
+        config = read_json_capped(sys.argv[1], MAX_CONFIG_FILE_BYTES)
         accounts = config.get("accounts", [])
         if not isinstance(accounts, list):
             raise ValueError("'accounts' must be a list")
@@ -393,6 +514,12 @@ def main() -> int:
         return 2
 
     state_dir = str(config.get("stateDir") or (os.path.expanduser("~") + "/.local/state/omaimapmail"))
+
+    if len(accounts) > MAX_ACCOUNTS:
+        emit({"type": "error", "accountId": "*", "kind": "config",
+              "message": "accounts file lists %d accounts; only the first %d will be watched"
+              % (len(accounts), MAX_ACCOUNTS)})
+        accounts = accounts[:MAX_ACCOUNTS]
 
     threads = []
     for account in accounts:

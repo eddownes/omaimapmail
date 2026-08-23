@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.1 — resource-ceiling hardening
+
+Fixes required by the [omarchyplugins.com](https://omarchyplugins.com) review
+of this plugin, reported by reviewer **HANCORE-linux**: at the submitted
+HEAD (`77fd4e946f267cfd64a9341c197b9422635c2e09`), the long-lived watcher in
+`scripts/mail_watcher.py` accepted unbounded IMAP readline/fetch bodies,
+parsed and decoded each complete message, captured `secret-tool` output
+completely, and read config/state JSON without byte or account-count
+ceilings — so a hostile mail server, message, keyring value, or replaced
+local file could exhaust the helper's and shell's memory. This release caps
+protocol lines/bodies and child-process/file reads, bounds threads/records/
+fields, and emits only bounded event lines:
+
+- IMAP message fetches use partial-fetch syntax (`BODY.PEEK[]<0.N>`) instead
+  of an unbounded `BODY.PEEK[]`, capping bytes pulled per message regardless
+  of what size the message or server claims.
+- IDLE's untagged-response draining loops are capped by line count, not just
+  by time.
+- `secret-tool`'s output is read on a bounded reader instead of
+  `subprocess.run(capture_output=True)`, capped by both bytes and wall-clock.
+- MIME parts scanned per message, and decoded header fields (subject,
+  sender name/address) kept in emitted events, are both capped.
+- `accounts.json` and each account's `state.json` are read with a byte
+  ceiling before parsing; the seen-mail baseline loaded from state is capped
+  in entry count; the number of accounts/threads started from a config file
+  is capped; a per-account `fetchLimit` is clamped to a sane maximum.
+- Emitted error-event text is truncated, so a hostile server can't inflate
+  an exception message into an unbounded event line.
+- Also fixed while in there: the watcher's exception handler didn't catch
+  the IDLE-protocol `RuntimeError`s (pre-existing, and one newly added
+  above) — a triggering server would have silently killed that account's
+  thread forever instead of backing off and reconnecting like every other
+  network failure.
+
+No behavior changes for well-formed accounts/messages — every ceiling above
+sits far above normal usage.
+
+Thanks to HANCORE-linux for the review.
+
 ## 1.0.0 — first public release
 
 OmaIMAPMail started as a private fork of [keithnyc/omafmail](https://github.com/keithnyc/omafmail)
