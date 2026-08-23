@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.eddownes.omaimapmail",
+  "name": "OmaIMAPMail",
+  "version": "1.0.0",
+  "author": "Ed Downes (eddownes)",
+  "license": "MIT",
+  "description": "Multi-account IMAP unread mail in one bar icon — per-account colors, filtering, desktop notifications, and an in-shell settings form to add/edit/remove accounts. Fork of keithnyc/omafmail.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaIMAPMail",
+    "description": "Combined unread count across every configured IMAP account, with a sender/subject/preview popup, per-account filtering, and a settings form to add accounts",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
