@@ -227,4 +227,6 @@ Issues and pull requests welcome at
 
 MIT — see [`LICENSE`](LICENSE). Originally forked from
 [keithnyc/omafmail](https://github.com/keithnyc/omafmail) (MIT licensed);
-see [`CHANGELOG.md`](CHANGELOG.md) for what's changed since.
+see [`CHANGELOG.md`](CHANGELOG.md) for what's changed since, and
+[`NOTICE.md`](NOTICE.md) for the external tools this plugin shells out to
+at runtime and their licenses.

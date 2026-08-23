@@ -23,23 +23,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## External dependencies
-
-OmaIMAPMail itself has no bundled third-party code or libraries. At runtime it
-shells out to the following system tools, which are not distributed with this
-plugin and are covered by their own respective licenses:
-
-- **python3** (standard library only — `imaplib`, `email`, `ssl`, `json`,
-  `threading`, etc. — no pip packages required)
-- **secret-tool** (part of `libsecret`) — stores and retrieves IMAP app
-  passwords via the system's Secret Service provider (e.g. GNOME Keyring)
-- **omarchy-notification-send** — part of Omarchy itself, used to post
-  desktop notifications
-- **xdg-open** — used to open an account's webmail URL when a message row is
-  clicked
-
-All IMAP communication uses Python's standard-library `imaplib`; no
-third-party Python packages are required or installed.
