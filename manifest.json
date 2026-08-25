@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.eddownes.omaimapmail",
   "name": "OmaIMAPMail",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Ed Downes (eddownes)",
   "license": "MIT",
   "description": "Multi-account IMAP unread mail in one bar icon — per-account colors, filtering, desktop notifications, and an in-shell settings form to add/edit/remove accounts. Fork of keithnyc/omafmail.",
