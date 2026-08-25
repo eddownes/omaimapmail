@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.2 — TLS verification and shell-side hardening
+
+Further fixes required by the [omarchyplugins.com](https://omarchyplugins.com)
+review of this plugin, reported by reviewer **HANCORE-linux** at the exact
+commit `ab4bbb28345ab1035b3a3f87a40db59be3518c90`:
+
+- **`scripts/mail_watcher.py`**: `imaplib.IMAP4_SSL` was opened without an
+  explicit `ssl_context`. Its default context
+  (`ssl._create_stdlib_context()`) verifies neither the server certificate
+  nor the hostname, so an active network attacker could impersonate an
+  account's IMAP server and capture its app password and mailbox data. Now
+  connects with `ssl.create_default_context()`, which verifies both.
+- **`Service.qml`**: the 1.0.1 ceilings on `accounts.json` were enforced only
+  in the Python watcher, not in the Quickshell service that also loads and
+  retains the same file. `loadAccounts()` now rejects files over 256 KiB
+  before parsing, caps the account list at 50 entries, and clamps every
+  string field to 500 characters — shell-side, independent of the watcher.
+- **`Panel.qml`**: the sender name, subject, and snippet `Text` elements used
+  the default `Text.AutoText` format, which sniffs HTML-looking content and
+  renders it as rich text. Since those fields come straight from the remote
+  mail server, a malicious or compromised server could smuggle in
+  remote-image loads (e.g. tracking pixels) via `<img>` tags. All three are
+  now pinned to `textFormat: Text.PlainText`.
+
+Thanks to HANCORE-linux for the review.
+
 ## 1.0.1 — resource-ceiling hardening
 
 Fixes required by the [omarchyplugins.com](https://omarchyplugins.com) review

@@ -34,6 +34,18 @@ Item {
   property bool manualReconnectRequested: false
   property int consecutiveFailures: 0
 
+  // Ceilings enforced on accounts.json before it's parsed/retained. This file
+  // is user-editable config, not remote-attacker input, but nothing stops it
+  // from being huge or malformed (a bad hand-edit, a botched sync/restore,
+  // disk corruption) — without a cap, loadAccounts() would happily JSON.parse
+  // and hold onto however much text is there, and mergedAccounts would fan
+  // that out across every widget with no limit on how many accounts or how
+  // large any single field is. These bound the blast radius shell-side
+  // rather than trusting the file to be well-formed.
+  readonly property int maxAccountsFileBytes: 262144 // 256 KiB
+  readonly property int maxAccountCount: 50
+  readonly property int maxFieldChars: 500
+
   readonly property bool checking: root.consecutiveFailures === 0 && watcherProcess.running
     && Object.keys(root.accountStates).length < root.accountDefs.length
 
@@ -63,16 +75,47 @@ Item {
     return { version: 1, accounts: [] }
   }
 
+  // Clamps every string field on an account entry to maxFieldChars so one
+  // oversized value (a pasted URL gone wrong, a corrupted field) can't blow
+  // up memory/layout for the whole panel. Applied after JSON.parse, before
+  // the entry is retained in accountDefs.
+  function clampAccountFields(account) {
+    var clamped = {}
+    for (var key in account) {
+      var value = account[key]
+      clamped[key] = (typeof value === "string" && value.length > root.maxFieldChars)
+        ? value.slice(0, root.maxFieldChars)
+        : value
+    }
+    return clamped
+  }
+
   function loadAccounts(raw) {
-    try {
-      var parsed = JSON.parse(String(raw || ""))
-      var list = Array.isArray(parsed.accounts) ? parsed.accounts : []
-      root.accountDefs = list
-      root.accountsError = ""
-    } catch (error) {
+    var text = String(raw || "")
+    if (text.length > root.maxAccountsFileBytes) {
+      // Bail out before JSON.parse ever sees it — an oversized file is
+      // rejected wholesale rather than parsed and then truncated, since
+      // parsing itself is the thing we don't want to do on unbounded input.
       root.accountDefs = []
-      root.accountsError = String(error)
-      console.warn("omaimapmail: accounts.json error:", root.accountsError)
+      root.accountsError = "accounts.json is " + text.length + " bytes, over the "
+        + root.maxAccountsFileBytes + " byte limit — refusing to load"
+      console.warn("omaimapmail:", root.accountsError)
+    } else {
+      try {
+        var parsed = JSON.parse(text)
+        var list = Array.isArray(parsed.accounts) ? parsed.accounts : []
+        if (list.length > root.maxAccountCount) {
+          console.warn("omaimapmail: accounts.json has " + list.length + " accounts, keeping only the first "
+            + root.maxAccountCount)
+          list = list.slice(0, root.maxAccountCount)
+        }
+        root.accountDefs = list.map(root.clampAccountFields)
+        root.accountsError = ""
+      } catch (error) {
+        root.accountDefs = []
+        root.accountsError = String(error)
+        console.warn("omaimapmail: accounts.json error:", root.accountsError)
+      }
     }
     root.accountsReady = true
     // Prune state for accounts that no longer exist so a removed account's

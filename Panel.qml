@@ -348,6 +348,14 @@ Panel {
           Text {
             Layout.fillWidth: true
             text: card.fromName
+            // fromName/subjectText/snippetText all come straight from the
+            // remote mail server's headers/body. Text's default AutoText
+            // format sniffs content and renders anything HTML-ish as rich
+            // text, which would let a malicious/compromised server smuggle
+            // <img>-style remote-resource loads (tracking pixels, etc.) into
+            // the panel. Pin these to PlainText so that content is always
+            // shown literally.
+            textFormat: Text.PlainText
             elide: Text.ElideRight
             color: card.rowForeground
             font.family: card.rowFontFamily
@@ -366,6 +374,7 @@ Panel {
         Text {
           Layout.fillWidth: true
           text: card.subjectText
+          textFormat: Text.PlainText
           elide: Text.ElideRight
           color: card.rowForeground
           font.family: card.rowFontFamily
@@ -375,6 +384,7 @@ Panel {
         Text {
           Layout.fillWidth: true
           text: card.snippetText
+          textFormat: Text.PlainText
           wrapMode: Text.Wrap
           maximumLineCount: 2
           elide: Text.ElideRight

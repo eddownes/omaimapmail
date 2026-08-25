@@ -258,7 +258,13 @@ def plain_text_snippet(msg: email.message.Message) -> str:
 
 
 def connect(host: str, port: int, account: str, password: str) -> IMAP4Idle:
-    imap = IMAP4Idle(host, port, timeout=CONNECT_TIMEOUT_SECONDS)
+    # imaplib.IMAP4_SSL's default ssl_context (ssl._create_stdlib_context())
+    # verifies neither the server certificate nor the hostname — unlike
+    # ssl.create_default_context(), which is opt-in here on purpose so an
+    # active network attacker can't impersonate the IMAP server and capture
+    # the account's app password and mailbox contents.
+    ssl_context = ssl.create_default_context()
+    imap = IMAP4Idle(host, port, timeout=CONNECT_TIMEOUT_SECONDS, ssl_context=ssl_context)
     imap.login(account, password)
     return imap
 
