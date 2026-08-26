@@ -20,6 +20,15 @@ Item {
     ? manifest.__sourceDir + "/scripts/mail_watcher.py"
     : ""
 
+  // accounts.json is normally trusted (written by the Settings view or by
+  // hand), but it can be swapped out from under this shell process — same
+  // "replaced local file" risk mail_watcher.py already guards against for
+  // its own copy of this data. These mirror that script's MAX_CONFIG_FILE_BYTES,
+  // MAX_ACCOUNTS and MAX_FIELD_CHARS so neither side is the soft one.
+  readonly property int maxAccountsFileBytes: 2 * 1024 * 1024
+  readonly property int maxAccountsCount: 50
+  readonly property int maxAccountFieldChars: 300
+
   // Parsed accounts.json — array of {id, label, color, host, port, account,
   // mailbox, secretService, fetchLimit, inboxUrl, enabled}. Metadata only;
   // live IMAP state lives in accountStates, keyed the same way by id.
@@ -63,11 +72,29 @@ Item {
     return { version: 1, accounts: [] }
   }
 
+  // Bounds a single account entry's string fields so one oversized value in
+  // accounts.json (a hand-edited or externally-replaced file) can't inflate
+  // this shell process's memory the way mail_watcher.py's MAX_FIELD_CHARS
+  // bounds its own copy of the same data.
+  function capAccountFields(a) {
+    var capped = {}
+    for (var key in a) {
+      var value = a[key]
+      capped[key] = (typeof value === "string") ? value.slice(0, root.maxAccountFieldChars) : value
+    }
+    return capped
+  }
+
   function loadAccounts(raw) {
     try {
       var parsed = JSON.parse(String(raw || ""))
       var list = Array.isArray(parsed.accounts) ? parsed.accounts : []
-      root.accountDefs = list
+      if (list.length > root.maxAccountsCount) {
+        console.warn("omaimapmail: accounts.json lists " + list.length
+          + " accounts, keeping first " + root.maxAccountsCount)
+        list = list.slice(0, root.maxAccountsCount)
+      }
+      root.accountDefs = list.map(root.capAccountFields)
       root.accountsError = ""
     } catch (error) {
       root.accountDefs = []
@@ -259,7 +286,42 @@ Item {
       root.accountsReady = true
       accountsFile.setText(JSON.stringify(root.defaultAccountsDoc(), null, 2) + "\n")
     }
-    onFileChanged: reload()
+    onFileChanged: root.reloadAccountsFileIfSafe()
+  }
+
+  // FileView has no way to cap how many bytes it reads — text()/reload()
+  // pull the whole file into this shell process's memory regardless of
+  // size. accounts.json can be swapped out from under us (an external
+  // replace, not just the Settings view), so stat it out-of-band first and
+  // only let FileView touch it when it's within maxAccountsFileBytes;
+  // otherwise report an error without ever loading the oversized content.
+  function reloadAccountsFileIfSafe() {
+    accountsSizeCheck.running = false
+    accountsSizeCheck.running = true
+  }
+
+  Process {
+    id: accountsSizeCheck
+    command: ["stat", "-c", "%s", root.accountsPath]
+    stdout: StdioCollector { id: accountsSizeOutput }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        // Most likely no accounts.json yet — let FileView's own
+        // onLoadFailed seed a fresh default doc.
+        accountsFile.reload()
+        return
+      }
+      var size = parseInt(accountsSizeOutput.text, 10)
+      if (!isNaN(size) && size <= root.maxAccountsFileBytes) {
+        accountsFile.reload()
+      } else {
+        root.accountDefs = []
+        root.accountsReady = true
+        root.accountsError = "accounts.json exceeds " + root.maxAccountsFileBytes
+          + " bytes — refusing to load it"
+        console.warn("omaimapmail:", root.accountsError)
+      }
+    }
   }
 
   Process {
@@ -267,7 +329,7 @@ Item {
     running: true
     onExited: {
       root.dirReady = true
-      accountsFile.reload()
+      root.reloadAccountsFileIfSafe()
     }
   }
 

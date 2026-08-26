@@ -348,6 +348,12 @@ Panel {
           Text {
             Layout.fillWidth: true
             text: card.fromName
+            // Sender name is attacker-controlled mail content. Text's
+            // default textFormat is AutoText, which sniffs for markup and
+            // renders it as rich text when found — including <img> tags
+            // that fetch remote images. Force plain text so a crafted
+            // sender name can't trigger a remote-image load.
+            textFormat: Text.PlainText
             elide: Text.ElideRight
             color: card.rowForeground
             font.family: card.rowFontFamily
@@ -366,6 +372,9 @@ Panel {
         Text {
           Layout.fillWidth: true
           text: card.subjectText
+          // Subject is attacker-controlled mail content — see the
+          // fromName Text above for why this needs to stay plain text.
+          textFormat: Text.PlainText
           elide: Text.ElideRight
           color: card.rowForeground
           font.family: card.rowFontFamily
@@ -375,6 +384,9 @@ Panel {
         Text {
           Layout.fillWidth: true
           text: card.snippetText
+          // Snippet is derived from the message body — same rich-text
+          // remote-image risk as fromName/subjectText above.
+          textFormat: Text.PlainText
           wrapMode: Text.Wrap
           maximumLineCount: 2
           elide: Text.ElideRight
