@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.2 — verified TLS and shell-side ceilings
+
+Fixes required by the [omarchyplugins.com](https://omarchyplugins.com) review
+of this plugin, reported by reviewer **ryanrhughes**: at the previously
+submitted HEAD (`ab4bbb28345ab1035b3a3f87a40db59be3518c90`), the IMAP
+connection didn't verify the server's TLS certificate or hostname, the QML
+service still loaded and retained the complete `accounts.json` with no
+shell-side byte/account/field ceilings (the prior 1.0.1 fix only bounded the
+Python watcher's own copy of that data), and attacker-controlled sender/
+subject/snippet text reached `Text` elements at their default rich-text
+setting, permitting remote-image loads. This release:
+
+- `scripts/mail_watcher.py`'s `connect()` now opens `IMAP4_SSL` with an
+  explicit `ssl.create_default_context()` instead of relying on its
+  unverified default, so a network attacker can no longer impersonate an
+  IMAP server to capture an account's password and mail.
+- `Service.qml` stats `accounts.json` out-of-band before ever letting
+  `FileView` load it, refusing to load (and reporting an error) past a 2 MiB
+  ceiling instead of pulling an arbitrarily large file into the shell
+  process; parsed account entries are now also capped at 50 and each
+  string field truncated to 300 characters, mirroring the ceilings
+  `mail_watcher.py` already applies to its own copy of the same file.
+- `Panel.qml`'s sender-name, subject, and snippet `Text` elements now set
+  `textFormat: Text.PlainText` explicitly, so a crafted HTML-looking
+  message can no longer get rendered as rich text and trigger a remote
+  image fetch.
+
+No behavior changes for well-formed accounts/messages/servers.
+
+Thanks to ryanrhughes for the review.
+
 ## 1.0.1 — resource-ceiling hardening
 
 Fixes required by the [omarchyplugins.com](https://omarchyplugins.com) review
