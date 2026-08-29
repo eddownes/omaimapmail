@@ -273,52 +273,83 @@ Item {
     }
   }
 
+  // accounts.json can be swapped out from under us (an external replace,
+  // not just the Settings view). FileView has no way to cap how many bytes
+  // text()/reload() pull into this shell process's memory, so it's used
+  // here only to write (setText) and to notice changes (watchChanges) —
+  // never to read content. All reads instead go through
+  // reloadAccountsFileIfSafe() below.
+  //
+  // An earlier version of that guard ran a separate `stat` process and only
+  // called FileView.reload() when it reported a safe size. That resolves
+  // the path twice — once for `stat`, once when FileView opens it — with a
+  // window in between where the path can be repointed at a FIFO (open+read
+  // would then block, or hand back attacker-controlled bytes) or at an
+  // oversized regular file (which FileView would then load in full: it has
+  // no cap of its own). Checking a size obtained from one path resolution
+  // before acting on a second, later one is a check/open race no matter how
+  // small the window is; the fix is to never resolve the path twice. The
+  // script below opens the path exactly once, then checks and reads that
+  // same file descriptor — not the path — so there is nothing left to swap
+  // in underneath it.
+  readonly property string accountsFileGuardScript: `
+import os, stat, sys
+path, cap = sys.argv[1], int(sys.argv[2])
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    sys.exit(2)
+except OSError:
+    sys.exit(1)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        sys.exit(4)
+    if info.st_size > cap:
+        sys.exit(3)
+    data = os.read(fd, cap + 1)
+    if len(data) > cap:
+        sys.exit(3)
+    os.write(1, data)
+finally:
+    os.close(fd)
+`
+
   FileView {
     id: accountsFile
     path: root.accountsPath
     watchChanges: true
     printErrors: false
-    onLoaded: root.loadAccounts(text())
-    onLoadFailed: function(error) {
-      // No accounts.json yet (fresh install) — seed an empty one so the
-      // Settings view has something to write into.
-      root.accountDefs = []
-      root.accountsReady = true
-      accountsFile.setText(JSON.stringify(root.defaultAccountsDoc(), null, 2) + "\n")
-    }
     onFileChanged: root.reloadAccountsFileIfSafe()
   }
 
-  // FileView has no way to cap how many bytes it reads — text()/reload()
-  // pull the whole file into this shell process's memory regardless of
-  // size. accounts.json can be swapped out from under us (an external
-  // replace, not just the Settings view), so stat it out-of-band first and
-  // only let FileView touch it when it's within maxAccountsFileBytes;
-  // otherwise report an error without ever loading the oversized content.
   function reloadAccountsFileIfSafe() {
-    accountsSizeCheck.running = false
-    accountsSizeCheck.running = true
+    accountsReader.running = false
+    accountsReader.running = true
   }
 
   Process {
-    id: accountsSizeCheck
-    command: ["stat", "-c", "%s", root.accountsPath]
-    stdout: StdioCollector { id: accountsSizeOutput }
+    id: accountsReader
+    command: ["python3", "-c", root.accountsFileGuardScript, root.accountsPath, String(root.maxAccountsFileBytes)]
+    stdout: StdioCollector { id: accountsReaderOutput }
+    stderr: SplitParser {
+      onRead: function(line) { console.warn("omaimapmail(accounts-reader):", line) }
+    }
     onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        // Most likely no accounts.json yet — let FileView's own
-        // onLoadFailed seed a fresh default doc.
-        accountsFile.reload()
-        return
-      }
-      var size = parseInt(accountsSizeOutput.text, 10)
-      if (!isNaN(size) && size <= root.maxAccountsFileBytes) {
-        accountsFile.reload()
+      if (exitCode === 0) {
+        root.loadAccounts(accountsReaderOutput.text)
+      } else if (exitCode === 2) {
+        // No accounts.json yet (fresh install) — seed an empty one so the
+        // Settings view has something to write into.
+        root.accountDefs = []
+        root.accountsReady = true
+        accountsFile.setText(JSON.stringify(root.defaultAccountsDoc(), null, 2) + "\n")
       } else {
         root.accountDefs = []
         root.accountsReady = true
-        root.accountsError = "accounts.json exceeds " + root.maxAccountsFileBytes
-          + " bytes — refusing to load it"
+        root.accountsError = exitCode === 3
+          ? ("accounts.json exceeds " + root.maxAccountsFileBytes + " bytes — refusing to load it")
+          : "accounts.json is not a plain file — refusing to load it"
         console.warn("omaimapmail:", root.accountsError)
       }
     }

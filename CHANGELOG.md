@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.3 — closed the accounts.json check/open race
+
+Follow-up fix required by the
+[HANCORE-linux/omarchy-plugin-marketplace](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/1811)
+security review: at the previously submitted HEAD
+(`b43b2d62309f1e307c6a5a6ef1a3657a0b16cb9b`), the TLS and `PlainText` fixes
+held up, but `Service.qml`'s `accounts.json` guard still resolved the path
+twice — once in an out-of-band `stat` process, once when `FileView.reload()`
+later opened it — leaving a window in between where the path could be
+repointed at a FIFO (whose open+read would then block, or hand back
+attacker-controlled bytes) or an oversized regular file (which `FileView`
+would then load in full, since it has no byte cap of its own). This release:
+
+- Replaces the `stat`-then-`FileView.reload()` pair with a single helper
+  process that opens `accounts.json` exactly once and then checks and reads
+  that same file descriptor — never the path again — rejecting anything
+  that isn't a plain regular file within the existing 2 MiB ceiling before a
+  single byte of it reaches this shell process. `FileView` is now used only
+  to write `accounts.json` and to notice external changes to it, never to
+  read its content.
+
+No behavior changes for well-formed accounts files.
+
 ## 1.0.2 — verified TLS and shell-side ceilings
 
 Fixes required by the [omarchyplugins.com](https://omarchyplugins.com) review
