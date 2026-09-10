@@ -16,9 +16,12 @@ Item {
   readonly property string accountsDir: home + "/.config/omaimapmail"
   readonly property string accountsPath: root.accountsDir + "/accounts.json"
   readonly property string stateDir: home + "/.local/state/omaimapmail"
-  readonly property string watcherScriptPath: manifest && manifest.__sourceDir
-    ? manifest.__sourceDir + "/scripts/mail_watcher.py"
-    : ""
+  // manifest.__sourceDir is stripped from third-party plugins' manifests
+  // before the host hands them their service instance (shell.qml's
+  // publicPluginManifest), so it's never reliable here. Resolve the script
+  // relative to this QML file instead, the way omabose's bridge.py does.
+  readonly property string watcherScriptPath: decodeURIComponent(
+    Qt.resolvedUrl("scripts/mail_watcher.py").toString().replace(/^file:\/\//, ""))
 
   // accounts.json is normally trusted (written by the Settings view or by
   // hand), but it can be swapped out from under this shell process — same
